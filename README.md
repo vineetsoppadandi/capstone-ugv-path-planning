@@ -1,17 +1,177 @@
-# Capstone: Drone Survey Path Planning
+# UGV Optimal Path Planning for Optimal Data Collection
 
-Autonomous drone path planning and sensor coverage algorithms developed as part of a Masters Capstone project at the **University of Melbourne**.  The project investigates how a drone can be guided to survey a building autonomously — computing both the geometric flight path and the optimal sensor positions for LIDAR and photogrammetry capture.
+**Capstone Project — CP12-IMA-191**  
+Department of Mechanical Engineering, University of Melbourne  
+Final Report: 25 October 2019
+
+| Role | Name |
+|---|---|
+| Student | Vineet Soppadandi (888495) |
+| Academic Supervisor | Professor Ivan Marusic |
+| Academic Examiner | Mr Lawrence Molloy |
+| Industry Supervisor | Dr Martin Tomko |
+| Client Organisation | University of Melbourne, Melbourne School of Engineering |
 
 ---
 
-## Project Overview
+## Executive Summary
 
-Surveying a building with a drone requires solving two distinct problems:
+This project was inspired by data collection challenges encountered at the **Budj Bim UNESCO World Heritage Site** in western Victoria — a Gunditjmara cultural heritage site containing ancient house structures made from rocks.
 
-1. **Path planning** — how does the drone move smoothly from A to B while respecting curvature constraints and avoiding obstacles?
-2. **Sensor coverage** — where should the drone hover to ensure every face of the building is captured within the sensor's field of view?
+When a HUSKY A200 rover was manually piloted around these structures to collect LIDAR and photogrammetry data, several critical problems emerged:
 
-This project addresses both, producing five runnable Python modules across two packages.
+- **Inconsistent LIDAR point density** — the distance from the rover to each structure varied, causing some walls to be barely captured and others over-sampled
+- **Inconsistent photogrammetry pixel density** — photos taken at varying distances produced images of the same house at vastly different scales, significantly increasing post-processing effort
+- **Physical damage to the heritage site** — the rover's repeated stopping and re-orientating at waypoints left heavy tyre marks on the soft ground
+
+This project proposes two autonomous path planning algorithms that solve these problems:
+
+1. **LIDAR Coverage Path** — a standoff orbit that maintains a constant sensor-to-object distance and keeps the laser perpendicular to every wall face, ensuring a consistent point density of ≥ 250 pts/m² throughout
+2. **Photogrammetry Coverage Path** — an optimal set of hover positions where the camera captures each wall face perpendicularly with a consistent pixel density, connected by smooth η³ (7th-order polynomial) splines that eliminate the need for the rover to re-orient at any point
+
+---
+
+## Background & Motivation
+
+The Budj Bim heritage site has a flat, soft surface. The house structures — built from rocks — are approximately rectangular. Collecting accurate 3D data from these structures is essential for archaeological research, AI-based feature recognition, and cultural preservation.
+
+The rover was initially operated manually with no real-time data feedback to the operator. Post-processing revealed:
+
+- LIDAR data with heavily varying point densities between house structures despite the pilot's best efforts to maintain a consistent standoff
+- Photogrammetry images of the same structure at wildly different scales (visible from the tyre marks left in the ground)
+- Tyre damage to the heritage site caused by repeated stopping, spinning, and re-orienting
+
+An autonomous path planning algorithm was identified as the solution — one that plans the route *before* deployment based on sensor specifications and building geometry, leaving no room for human error during data collection.
+
+---
+
+## System — HUSKY A200
+
+The HUSKY A200 is an industrial-grade unmanned ground vehicle (UGV) running ROS on Ubuntu 16.04.
+
+### Mapping Sensors
+
+| Sensor | Specification |
+|--------|--------------|
+| **Bumblebee Stereo Camera** | Focal length 3.8 mm, HFOV 66°, VFOV 52°, ICX424 sensor, 648 × 488 px |
+| **Velodyne LIDAR 32HDL** | vFOV 10.67°, hAngular 0.16°, vAngular 1.33°, 32 lasers, 700,000 pts/s, 100 m range |
+
+### Navigation Sensors
+
+| Sensor | Purpose |
+|--------|---------|
+| Wheel odometers | Real-time wheel speed and distance |
+| IMU (MicroStrain 3DM-GX5-25) | Acceleration and orientation at 1000 Hz |
+| GNSS RTK GPS (SwiftNav Duro) | Centimetre-level positioning at 10 Hz |
+
+### Rover Dynamics
+
+The HUSKY is modelled as a differential-drive robot:
+
+```
+State:      X = [x, y, θ]ᵀ
+Inputs:     V = [v, ω]ᵀ  (linear and angular velocity)
+Kinematics: Ẋ = [v·cos θ, v·sin θ, ω]ᵀ
+```
+
+---
+
+## Algorithms
+
+### 1. LIDAR Optimal Coverage Path (`sensor_coverage/lidar_coverage.py`)
+
+**Objective:** Maintain a consistent LIDAR point density of ≥ 250 pts/m² across all faces of the building structure.
+
+**Key constraint:** The angle of incidence between the laser and the surface must be minimised — ideally 0° (laser return at 90° to the surface). A higher angle of incidence directly reduces point density and increases correction bias in post-processing.
+
+**Point density formula:**
+
+```
+Point density  = (Horizontal laser points / dh) × (Vertical laser points / dv)
+
+Horizontal laser points = θh / resolution_H
+Vertical laser points   = θv / resolution_V
+```
+
+Where:
+- `θv` = vertical angle subtended by the full building height at the computed standoff
+- `θh` = horizontal angle subtended by 0.5 m of facade width at the standoff
+- `resolution_H` = 0.16° (Velodyne horizontal angular resolution)
+- `resolution_V` = 1.33° (Velodyne vertical angular resolution)
+
+The algorithm uses **Shapely's polygon buffer** to generate the equidistant flight path at the computed standoff distance. The rounded corners in the output path ensure continuous sensor coverage around building edges without the rover needing to re-orient.
+
+**Limitation:** For concave structures, the buffered path produces a sharp turning point requiring the rover to re-orient — manual control is recommended for those cases.
+
+---
+
+### 2. Photogrammetry Optimal Coverage Path (`sensor_coverage/photogrammetry_basic.py` and `photogrammetry_advanced.py`)
+
+**Objective:** Compute optimal hover positions for the camera such that each building face is captured perpendicularly with a consistent pixel density.
+
+**Standoff distance (camera must see full building height):**
+
+```
+Distance to Object (mm) = focal_length × real_height × image_height_pixels
+                          ─────────────────────────────────────────────────
+                           object_height_pixels × sensor_height
+```
+
+**Number of camera positions per wall face (proportion formula):**
+
+```
+Proportion = DH / CH
+```
+
+Where `DH` is the wall face width and `CH` is the horizontal coverage width at the computed standoff. If proportion ≤ 1, one position per face is sufficient. If proportion > 1 (e.g. 1.7), the algorithm places 2 positions to ensure the full wall is captured.
+
+**Interior/exterior detection:** The algorithm uses **Shapely point containment** to determine which side of each wall is the building interior. The camera is always placed on the exterior side, regardless of building orientation — this is the key improvement in `photogrammetry_basic.py` over simpler directional-rule approaches.
+
+**Limitation:** The pixel density formula assumes the wall surface is perpendicular to the camera (no tilting). For curved house structures, the algorithm is less accurate. For concave structures, optimal points near the inner corner may overlap — flagged as future work.
+
+---
+
+### 3. η³ Spline Path Planning (`path_planning/dynamic_path_planner.py`)
+
+**Objective:** Connect the optimal photogrammetry positions with a smooth path that does not require the rover to stop and re-orient at any point.
+
+A straight-line traversal between positions would require the rover to stop and spin at each waypoint — this causes tyre damage to the soft heritage ground. The η³ spline avoids this entirely.
+
+The **η³ (eta-cubic) spline** is a 7th-order polynomial:
+
+```
+α(u) = a₀ + a₁u + a₂u² + a₃u³ + a₄u⁴ + a₅u⁵ + a₆u⁶ + a₇u⁷
+β(u) = β₀ + β₁u + β₂u² + β₃u³ + β₄u⁴ + β₅u⁵ + β₆u⁶ + β₇u⁷
+```
+
+With 10 design parameters split between:
+- **κ = [κa, κ̇a, κb, κ̇b]** — curvature and curvature derivative at start/end
+- **η = [η₁, η₂, η₃, η₄, η₅, η₆]** — velocity and acceleration shaping at start/end (first 3 affect velocity; last 3 affect acceleration)
+
+**Sub-optimal parameter selection** (used in this project):
+
+```
+η₁ = η₂ = |pa − pb|     (distance between start and end poses)
+All other η and κ = 0
+```
+
+This ensures a smooth C² continuous path (matching position, heading, and curvature at segment boundaries) with no abrupt direction changes — critical for operating on soft, sensitive ground.
+
+---
+
+### 4. Trajectory Planner with Velocity Profile (`path_planning/trajectory_planner.py`)
+
+**Objective:** Add a time parameterisation to the η³ geometric path, computing a smooth velocity profile so the rover starts and stops at rest without jerky motion at turning points.
+
+A **seven-section S-curve (jerk-limited) velocity profile** is computed:
+
+```
+Sections: [max jerk up] → [max accel] → [reduce jerk] → [cruise] → [reduce jerk] → [max decel] → [max jerk down]
+```
+
+This ensures continuous velocity and acceleration throughout the trajectory — the angular velocity spike visible at the tightest turn point (where the rover transitions 90° heading) is accommodated smoothly within the profile bounds.
+
+> **Note:** Full trajectory planning was identified during the project as the recommended next step but was discontinued due to time constraints. This implementation completes that work.
 
 ---
 
@@ -20,137 +180,39 @@ This project addresses both, producing five runnable Python modules across two p
 ```
 capstone-drone-survey-planning/
 ├── path_planning/
-│   ├── eta3_spline_path.py          # Shared eta^3 spline primitives
-│   ├── dynamic_path_planner.py      # Obstacle-aware path planner
-│   └── trajectory_planner.py        # Path + S-curve velocity profile
+│   ├── eta3_spline_path.py          # η³ spline primitives (C² path segment class)
+│   ├── dynamic_path_planner.py      # Multi-segment η³ loop around obstacles
+│   └── trajectory_planner.py        # η³ path + jerk-limited S-curve velocity profile
 ├── sensor_coverage/
-│   ├── lidar_coverage.py            # LIDAR scan path planner
-│   ├── photogrammetry_basic.py      # Camera placement — simple building
-│   └── photogrammetry_advanced.py   # Camera placement — complex building
+│   ├── lidar_coverage.py            # LIDAR standoff and buffered coverage path
+│   ├── photogrammetry_basic.py      # Camera placement — simple rectilinear building
+│   └── photogrammetry_advanced.py   # Camera placement — concave/L-shaped building
+├── screenshots/                     # Output figures (generated by generate_screenshots.py)
+├── generate_screenshots.py          # Regenerates all output figures headlessly
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## Modules
-
-### `path_planning/eta3_spline_path.py`
-**Shared module — eta^3 spline primitives**
-
-Provides the `eta3_path` and `eta3_path_segment` classes that underpin both path planning scripts.  An eta^3 (eta-cubic) spline is a 7th-degree polynomial parameterisation that guarantees C² continuity at segment boundaries — meaning position, heading, curvature, and curvature derivative all match seamlessly where segments join.  This makes it well-suited for robot motion planning where abrupt changes in curvature would cause wheel slip or aerodynamic instability.
-
-> **Origin:** Adapted from the PythonRobotics reference implementation (Sakai et al.).
-
----
-
-### `path_planning/dynamic_path_planner.py`
-**Obstacle-aware eta^3 path planner**
-
-Computes a three-segment eta^3 spline loop that navigates a drone around a polygon obstacle.  The obstacle geometry is defined using Shapely, and the path's shaping parameters (eta values) are derived automatically from the Euclidean distances between waypoints.
-
-**Output:** A matplotlib plot showing the closed flight path around the obstacle.
-
-> **Origin:** Hybrid — eta^3 primitives from PythonRobotics; obstacle integration, multi-segment loop construction, and Capstone geometry are original.
-
----
-
-### `path_planning/trajectory_planner.py`
-**eta^3 trajectory with jerk-limited velocity profile**
-
-Extends the geometric path with a time parameterisation.  A seven-section S-curve velocity profile is computed so the drone:
-- Starts and ends at rest (v = 0, a = 0)
-- Ramps up to cruising speed with bounded jerk (smooth acceleration)
-- Cruises at maximum speed
-- Decelerates symmetrically back to rest
-
-**Output:** Two matplotlib figures — (1) the trajectory path coloured by speed using the `inferno` colormap, and (2) linear and angular velocity profiles over time.
-
-> **Origin:** Hybrid — velocity profile algorithm from PythonRobotics/Dinius; Capstone-specific start/end poses and scenario setup are original.
-
----
-
-### `sensor_coverage/lidar_coverage.py`
-**LIDAR sensor coverage path planner**
-
-Given a building footprint and LIDAR sensor specifications, this module:
-1. Calculates the minimum standoff distance at which the sensor achieves a target point density (≥ 250 pts/m²) across the building facade.
-2. Generates a Shapely-buffered flight path at that standoff, with rounded corners to maintain continuous coverage around building edges.
-
-LIDAR sensor parameters used (Velodyne-class):
-
-| Parameter | Value |
-|-----------|-------|
-| Vertical angular resolution | 1.33° |
-| Horizontal angular resolution | 0.16° |
-| Vertical FOV | 10.67° |
-
-**Output:** A matplotlib plot showing the building footprint (orange) and the computed flight path (blue).
-
-> **Origin:** Fully original.
-
----
-
-### `sensor_coverage/photogrammetry_basic.py`
-**Photogrammetry path planner — simple rectilinear building (v1)**
-
-Given a rectilinear building footprint, computes optimal drone hover positions for photographing each wall face.  Uses **Shapely polygon containment testing** to determine which side of each wall is the building interior — so the camera is always correctly placed on the exterior side regardless of building orientation.
-
-Camera parameters:
-
-| Parameter | Value |
-|-----------|-------|
-| Focal length | 2.5 mm |
-| Sensor | 5.79 × 4.89 mm, 648 × 488 px |
-| Vertical FOV | 81° |
-| Horizontal FOV | 97° |
-
-**Output:** Camera positions printed to terminal + matplotlib plot of the building and hover points.
-
-> **Origin:** Fully original.  The interior/exterior detection via Shapely containment is an original contribution.
-
----
-
-### `sensor_coverage/photogrammetry_advanced.py`
-**Photogrammetry path planner — complex building (v2)**
-
-Extends the basic planner to support non-convex (L-shaped, U-shaped, or arbitrary concave) building footprints.  For long wall faces, multiple camera positions are computed along the face to maintain full horizontal coverage at the required standoff distance.
-
-**Example output for the L-shaped Capstone building:**
-```
-Camera positions (x, y):
-  [5.0, -5.0]
-  [15.0, 2.5]
-  [7.5, 10.0]
-  [10.0, 7.5]
-  [2.5, 15.0]
-  [-5.0, 5.0]
-```
-
-**Output:** Camera positions printed to terminal + matplotlib plot.
-
-> **Origin:** Fully original.
-
----
-
 ## Output Screenshots
 
-### Dynamic Path Planner — obstacle-aware η³ loop
+### Dynamic Path Planner — η³ spline loop around obstacle
 ![Dynamic path planner](screenshots/1_dynamic_path_planner_1.png)
 
-### Trajectory Planner — path coloured by speed
+### Trajectory Planner — path coloured by speed (inferno scale)
 ![Trajectory coloured by speed](screenshots/2_trajectory_planner_1.png)
 
 ### Trajectory Planner — velocity and angular velocity profiles
 ![Velocity profiles](screenshots/2_trajectory_planner_2.png)
 
-### LIDAR Coverage Path
+### LIDAR Coverage Path — equidistant orbit with rounded corners
 ![LIDAR coverage](screenshots/3_lidar_coverage_1.png)
 
-### Photogrammetry — Simple Building (v1)
+### Photogrammetry Planner — simple rectilinear building (v1)
 ![Photogrammetry basic](screenshots/4_photogrammetry_basic_1.png)
 
-### Photogrammetry — L-shaped Building (v2)
+### Photogrammetry Planner — L-shaped concave building (v2)
 ![Photogrammetry advanced](screenshots/5_photogrammetry_advanced_1.png)
 
 ---
@@ -159,20 +221,17 @@ Camera positions (x, y):
 
 ### Prerequisites
 
-- Python 3.8+
-- [uv](https://docs.astral.sh/uv/) (recommended) **or** pip
+Python 3.8+ and one of:
+- [uv](https://docs.astral.sh/uv/) (recommended — auto-manages Python)
+- pip
 
 ### Install dependencies
 
 ```bash
-# With pip
 pip install -r requirements.txt
-
-# With uv (auto-installs Python if needed)
-uv pip install -r requirements.txt
 ```
 
-### Run each script
+### Run each module
 
 ```bash
 # Path planning
@@ -185,21 +244,44 @@ python sensor_coverage/photogrammetry_basic.py
 python sensor_coverage/photogrammetry_advanced.py
 ```
 
+### Regenerate screenshots
+
+```bash
+python generate_screenshots.py
+```
+
 ---
 
 ## References
 
-- A. Sakai et al., **PythonRobotics**: A Python code collection of robotics algorithms.  
-  https://github.com/AtsushiSakai/PythonRobotics
+1. J. M. Glasgow et al., "Optimizing Information Value: Improving Rover Sensor Data Collection," *IEEE Trans. Syst., Man, Cybern.*, vol. 38, no. 3, pp. 593–601, 2008.
 
-- R. Bevilacqua and T. Frazzoli, **η³-Splines for the Smooth Path Generation of Wheeled Mobile Robots**, IEEE Transactions on Robotics, 2008.  
-  https://ieeexplore.ieee.org/document/4339545/
+2. M. J. Lato et al., "Bias Correction for View-limited Lidar Scanning of Rock Outcrops for Structural Characterization," 2009.
 
-- J. Dinius, **Smooth Trajectory Generation Using Eta^3 Splines**, 2018.  
-  https://jwdinius.github.io/blog/2018/eta3traj
+3. M. Tomas and A. Abellan, "Rockfall detection from terrestrial short LiDAR point clouds: A clustering approach using R," *Journal of Spatial Information Science*, pp. 95–110, 2014. *(source of the 250 pts/m² threshold)*
+
+4. J. Casper and R. Murphy, "Human–robot interactions during the robot-assisted urban search and rescue response at the World Trade Center," *IEEE Trans. Syst., Man, Cybern. B*, vol. 3, p. 367, 2003.
+
+5. A. Takahashi et al., "Local Path Planning and Motion Control for AGV in Positioning," *Int. Workshop on Intelligent Robot and Systems*, p. 89, 1989.
+
+6. A. Piazzi, C. G. Lo Bianco, and M. Romano, "η³-Splines for the Smooth Path Generation of Wheeled Mobile Robots," *IEEE Trans. Robotics*, vol. 23, 2007. *(primary algorithm reference)*
+
+7. FLIR, "Bumblebee®2 FireWire," 2019. https://www.flir.com.au/products/bumblebee2-firewire/
+
+8. Velodyne, "HDL-32E Manual," July 2015. https://velodynelidar.com
+
+9. Clearpath Robotics, "HUSKY A200," 2019. https://clearpathrobotics.com/husky-unmanned-ground-vehicle-robot/
+
+10. A. Sakai et al., "PythonRobotics: A Python code collection of robotics algorithms," 2016. https://github.com/AtsushiSakai/PythonRobotics *(η³ reference implementation)*
+
+11. T. M. Howard and A. Kelly, "Optimal Rough Terrain Trajectory Generation for Wheeled Mobile Robots," *Int. Journal of Robotics Research*, pp. 141–165, 2007.
 
 ---
 
-## Academic Context
+## Acknowledgements
 
-Developed as part of the **Capstone** subject in the Master of Engineering (Software) program at the **University of Melbourne**.  The project integrates motion planning theory (eta^3 splines) with practical sensor modelling (LIDAR resolution, camera FOV) to produce a complete autonomous building survey system.
+This project received support from those participating in and supporting the Budj Bim indigenous program. Special thanks to the traditional owners of the Gunditjmara land for welcoming this research, and to Professor Ivan Marusic, Dr Martin Tomko, Mr Lawrence Molloy, Vinod Veluguri, Jazor He, Yuan Xui, Evan Joseph, and Tomas for their guidance and support throughout.
+
+---
+
+*University of Melbourne, Melbourne School of Engineering — Capstone Project CP12-IMA-191, 2019*
