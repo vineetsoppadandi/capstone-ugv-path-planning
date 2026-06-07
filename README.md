@@ -133,6 +133,28 @@ Camera positions (x, y):
 
 ---
 
+## Output Screenshots
+
+### Dynamic Path Planner — obstacle-aware η³ loop
+![Dynamic path planner](screenshots/1_dynamic_path_planner_1.png)
+
+### Trajectory Planner — path coloured by speed
+![Trajectory coloured by speed](screenshots/2_trajectory_planner_1.png)
+
+### Trajectory Planner — velocity and angular velocity profiles
+![Velocity profiles](screenshots/2_trajectory_planner_2.png)
+
+### LIDAR Coverage Path
+![LIDAR coverage](screenshots/3_lidar_coverage_1.png)
+
+### Photogrammetry — Simple Building (v1)
+![Photogrammetry basic](screenshots/4_photogrammetry_basic_1.png)
+
+### Photogrammetry — L-shaped Building (v2)
+![Photogrammetry advanced](screenshots/5_photogrammetry_advanced_1.png)
+
+---
+
 ## Getting Started
 
 ### Prerequisites
