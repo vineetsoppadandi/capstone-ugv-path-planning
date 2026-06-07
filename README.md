@@ -193,7 +193,7 @@ This ensures continuous velocity and acceleration throughout the trajectory — 
 ## Repository Structure
 
 ```
-capstone-drone-survey-planning/
+capstone-ugv-path-planning/
 ├── path_planning/
 │   ├── eta3_spline_path.py          # η³ spline primitives (C² path segment class)
 │   ├── dynamic_path_planner.py      # Multi-segment η³ loop around obstacles
